@@ -48,7 +48,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 // URL du proxy Cloudflare Worker (remplie au deploiement)
-const PROXY = "%%PROXY_URL%%";
+const PROXY = "https://robot13-proxy.rmoreau13.workers.dev";
 const OPS = {EGA:"#FF69B4", CRA:"#8A2BE2", JBR:"#FFD700", FJO:"#FF5F1F", RMO:"#003366", ASA:"#39FF14"};
 const FR = {"🔥 Brûlant":"🔥","🌡️ Chaud":"🌡️","⏳ Tiède":"⏳","❄️ Froid":"❄️"};
 let coords = {};   // numero_dpe -> {lat,lng,type,fraicheur,etiquette,quartier}
