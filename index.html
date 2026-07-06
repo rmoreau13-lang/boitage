@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cockpit Boîtage — Le Pacte Immo</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=Lato:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --turquoise:#0097A9; }
+  * { box-sizing:border-box; margin:0; }
+  body { font-family:'Lato',sans-serif; height:100vh; display:flex; flex-direction:column; }
+  header { background:var(--turquoise); color:#fff; padding:8px 14px; display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  header h1 { font-family:'Caveat',cursive; font-size:1.7em; font-weight:600; }
+  .compteurs { display:flex; gap:10px; flex-wrap:wrap; margin-left:auto; }
+  .compteur { background:rgba(255,255,255,.15); border-radius:10px; padding:4px 10px; text-align:center; font-size:.78em; }
+  .compteur b { display:block; font-size:1.35em; }
+  .pastilles { display:flex; gap:6px; align-items:center; font-size:.75em; }
+  .pastille { display:flex; align-items:center; gap:3px; background:rgba(255,255,255,.15); border-radius:10px; padding:2px 7px; }
+  .rond { width:11px; height:11px; border-radius:50%; display:inline-block; border:1.5px solid #fff; }
+  #filtres { background:#f4f7f7; padding:6px 14px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:.85em; }
+  #filtres select,#filtres input { padding:4px 6px; border:1px solid #ccc; border-radius:6px; font-family:inherit; }
+  #map { flex:1; }
+  .popup b { color:var(--turquoise); }
+  .popup .liens a { margin-right:8px; text-decoration:none; }
+  #maj { font-size:.7em; opacity:.8; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏠 Cockpit Boîtage — Le Pacte Immo</h1>
+  <span id="maj"></span>
+  <div class="pastilles" id="pastilles"></div>
+  <div class="compteurs">
+    <div class="compteur"><b id="c-jour">–</b>DPE du jour</div>
+    <div class="compteur"><b id="c-brulants">–</b>🔥 Brûlants</div>
+    <div class="compteur"><b id="c-boitages">–</b>📬 Boîtés / 7 j</div>
+    <div class="compteur"><b id="c-visibles">–</b>affichés</div>
+  </div>
+</header>
+<div id="filtres">
+  <select id="f-zone"><option value="prospection">🎯 Prospection</option><option value="hors">🗄️ Hors prospection</option><option value="">Tout</option></select>
+  <select id="f-cp"><option value="">CP : tous</option></select>
+  <select id="f-quartier"><option value="">Quartier : tous</option></select>
+  <select id="f-type"><option value="">Type : tous</option><option value="appartement">🏢 Appartement</option><option value="maison">🏡 Maison</option><option value="immeuble">🏬 Immeuble</option></select>
+  <select id="f-fraicheur"><option value="">Fraîcheur : toutes</option><option>Brulant</option><option>Chaud</option><option>Tiede</option><option>Froid</option></select>
+  <select id="f-etiquette"><option value="">Étiquette : toutes</option><option>A</option><option>B</option><option>C</option><option>D</option><option>E</option><option>F</option><option>G</option></select>
+  <select id="f-statut"><option value="">Statut : tous</option><option>À boîter</option><option>Boîté</option><option>Contact pris</option><option>RDV estimation</option><option>Mandat</option><option>Mort</option><option value="__aucun__">Sans statut</option></select>
+  <select id="f-negociateur"><option value="">Négociateur : tous</option></select>
+  <label>Score ≥ <input type="number" id="f-score" value="50" min="0" max="105" style="width:60px"></label>
+</div>
+<div id="map"></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+<script>
+const FRAICHEUR_EMOJI = {Brulant:"🔥", Chaud:"🌡️", Tiede:"⏳", Froid:"❄️"};
+let donnees, cluster, carte;
+
+carte = L.map("map").setView([43.34, 5.42], 12);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+  {attribution:"© OpenStreetMap", maxZoom:19}).addTo(carte);
+cluster = L.markerClusterGroup({maxClusterRadius:55});
+carte.addLayer(cluster);
+
+fetch("data.geojson").then(r => r.json()).then(gj => {
+  donnees = gj;
+  const meta = gj.metadata || {};
+  document.getElementById("c-jour").textContent = meta.nouveaux_dpe_jour ?? "–";
+  document.getElementById("c-brulants").textContent = meta.prospects_brulants ?? "–";
+  const boit = meta.boitages_semaine || {};
+  document.getElementById("c-boitages").textContent = Object.values(boit).reduce((a,b)=>a+b,0);
+  document.getElementById("maj").textContent = "maj " + (meta.genere_le || "");
+  const ops = meta.operateurs || {};
+  document.getElementById("pastilles").innerHTML = Object.entries(ops).map(([k,hex]) =>
+    `<span class="pastille"><span class="rond" style="background:${hex}"></span>${k} <b>${boit[k]||0}</b></span>`).join("");
+  // filtres dynamiques
+  const cps = [...new Set(gj.features.map(f=>f.properties.cp))].sort();
+  const quartiers = [...new Set(gj.features.map(f=>f.properties.quartier).filter(Boolean))].sort();
+  document.getElementById("f-cp").innerHTML += cps.map(c=>`<option>${c}</option>`).join("");
+  document.getElementById("f-quartier").innerHTML += quartiers.map(q=>`<option>${q}</option>`).join("");
+  document.getElementById("f-negociateur").innerHTML += Object.keys(ops).map(o=>`<option>${o}</option>`).join("")
+    + '<option value="__aucun__">Sans négociateur</option>';
+  afficher();
+});
+
+function afficher() {
+  const v = id => document.getElementById(id).value;
+  const fZone=v("f-zone"), fCp=v("f-cp"), fQ=v("f-quartier"), fT=v("f-type"),
+        fF=v("f-fraicheur"), fE=v("f-etiquette"), fS=v("f-statut"),
+        fN=v("f-negociateur"), fScore=parseFloat(v("f-score")||0);
+  cluster.clearLayers();
+  let n = 0;
+  for (const f of donnees.features) {
+    const p = f.properties;
+    if (fZone && p.zone !== fZone) continue;
+    if (fCp && p.cp !== fCp) continue;
+    if (fQ && p.quartier !== fQ) continue;
+    if (fT && p.type !== fT) continue;
+    if (fF && p.fraicheur !== fF) continue;
+    if (fE && p.etiquette_dpe !== fE) continue;
+    if (fS === "__aucun__" ? p.statut : (fS && p.statut !== fS)) continue;
+    if (fN === "__aucun__" ? p.negociateur : (fN && p.negociateur !== fN)) continue;
+    if ((p.score||0) < fScore) continue;
+    n++;
+    const [lng, lat] = f.geometry.coordinates;
+    const m = L.circleMarker([lat, lng], {
+      radius:7, color:"#fff", weight:1.5, fillOpacity:.92,
+      fillColor: p.negociateur ? p.couleur : (p.score>=70 ? "#e53935" : p.score>=50 ? "#fb8c00" : "#9e9e9e")
+    });
+    const g = encodeURIComponent(p.adresse||"");
+    m.bindPopup(`<div class="popup"><b>${p.adresse||"?"}</b><br>
+      ${FRAICHEUR_EMOJI[p.fraicheur]||""} ${p.fraicheur||""} · DPE <b>${p.etiquette_dpe||"?"}</b> · ${p.type||""} · ${p.surface||"?"} m²<br>
+      Quartier : ${p.quartier||"?"} · Score <b>${p.score}</b><br>
+      ${p.negociateur ? "👤 "+p.negociateur : "Non assigné"} ${p.statut ? "· "+p.statut : ""}<br>
+      <span class="liens">
+        <a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${lat},${lng}">🗺️ Maps</a>
+        <a target="_blank" href="https://earth.google.com/web/@${lat},${lng},50a,200d,35y,0h,45t,0r">🌍 Earth</a>
+        <a target="_blank" href="https://www.pappers.fr/recherche?q=${g}">🏢 Pappers</a>
+        <a target="_blank" href="https://explore.data.gouv.fr/fr/immobilier?onglet=carte&filtre=tous&lat=${lat}&lng=${lng}&zoom=19.00">🏠 DVF</a>
+      </span></div>`);
+    cluster.addLayer(m);
+  }
+  document.getElementById("c-visibles").textContent = n;
+}
+document.querySelectorAll("#filtres select, #filtres input").forEach(e => e.addEventListener("change", afficher));
+</script>
+</body>
+</html>
