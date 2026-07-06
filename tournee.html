@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ma Tournée — Le Pacte Immo</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=Lato:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --turquoise:#0097A9; }
+  * { box-sizing:border-box; margin:0; }
+  body { font-family:'Lato',sans-serif; display:flex; flex-direction:column; height:100vh; }
+  header { background:var(--turquoise); color:#fff; padding:8px 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-family:'Caveat',cursive; font-size:1.5em; }
+  #selecteur { display:flex; gap:8px; flex-wrap:wrap; padding:14px; justify-content:center; }
+  .op { border:none; border-radius:24px; padding:12px 20px; font-size:1.05em; font-weight:700; color:#fff; cursor:pointer; box-shadow:0 2px 6px rgba(0,0,0,.25); }
+  #contenu { flex:1; display:none; flex-direction:column; min-height:0; }
+  #map { height:44%; }
+  #liste { flex:1; overflow-y:auto; padding:8px 12px; }
+  .etape { display:flex; gap:10px; align-items:center; padding:9px 6px; border-bottom:1px solid #eee; }
+  .etape.fait { opacity:.45; text-decoration:line-through; }
+  .num { min-width:30px; height:30px; border-radius:50%; color:#fff; display:flex; align-items:center; justify-content:center; font-weight:700; }
+  .etape input[type=checkbox] { width:26px; height:26px; accent-color:var(--turquoise); }
+  .infos { flex:1; font-size:.9em; }
+  .infos small { color:#666; }
+  #btn-maps { margin:8px 12px; padding:12px; background:var(--turquoise); color:#fff; border:none; border-radius:10px; font-size:1.05em; font-weight:700; cursor:pointer; }
+  #statut-bar { padding:4px 12px; font-size:.8em; color:#555; background:#f4f7f7; }
+  .mode { font-size:1.15em; padding:4px 8px; border:none; border-radius:8px; cursor:pointer;
+          background:rgba(255,255,255,.2); opacity:.55; }
+  .mode.actif { opacity:1; background:#fff; }
+</style>
+</head>
+<body>
+<header><h1>🚴 Ma Tournée</h1><span id="qui"></span>
+  <span id="modes" style="margin-left:auto;display:flex;gap:4px">
+    <button class="mode" data-m="pied" title="À pied">🚶</button>
+    <button class="mode" data-m="velo" title="Vélo">🚴</button>
+    <button class="mode" data-m="scooter" title="Scooter">🛵</button>
+    <button class="mode" data-m="voiture" title="Voiture">🚗</button>
+  </span></header>
+<div id="selecteur"></div>
+<div id="contenu">
+  <div id="statut-bar">Chargement…</div>
+  <div id="map"></div>
+  <button id="btn-maps">📍 Lancer dans Google Maps</button>
+  <div id="liste"></div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// URL du proxy Cloudflare Worker (remplie au deploiement)
+const PROXY = "%%PROXY_URL%%";
+const OPS = {EGA:"#FF69B4", CRA:"#8A2BE2", JBR:"#FFD700", FJO:"#FF5F1F", RMO:"#003366", ASA:"#39FF14"};
+const FR = {"🔥 Brûlant":"🔥","🌡️ Chaud":"🌡️","⏳ Tiède":"⏳","❄️ Froid":"❄️"};
+let coords = {};   // numero_dpe -> {lat,lng,type,fraicheur,etiquette,quartier}
+let etapes = [];
+
+// Mode de deplacement : pied / velo / scooter / voiture
+// -> parametre "travelmode" de l'itineraire Google Maps
+const GM_MODE = {pied:"!3e2", velo:"!3e1", scooter:"!3e0", voiture:"!3e0"};
+let mode = localStorage.getItem("tournee_mode") || "velo";
+function majModes() {
+  document.querySelectorAll(".mode").forEach(b =>
+    b.classList.toggle("actif", b.dataset.m === mode));
+}
+document.querySelectorAll(".mode").forEach(b => b.onclick = () => {
+  mode = b.dataset.m;
+  localStorage.setItem("tournee_mode", mode);
+  majModes();
+  maj("Mode : " + b.title + " — l'itinéraire Google Maps s'adaptera.");
+});
+majModes();
+
+// selecteur d'operateur (pastilles)
+const sel = document.getElementById("selecteur");
+for (const [op, hex] of Object.entries(OPS)) {
+  const b = document.createElement("button");
+  b.className = "op"; b.style.background = hex; b.textContent = op;
+  if (op === "JBR") b.style.color = "#333";
+  if (op === "ASA") b.style.color = "#333";
+  b.onclick = () => demarrer(op);
+  sel.appendChild(b);
+}
+// pre-filtrage par parametre ?op=RMO (pour l'embed dans chaque espace)
+const opURL = new URLSearchParams(location.search).get("op");
+if (opURL && OPS[opURL]) demarrer(opURL);
+
+async function demarrer(op) {
+  document.getElementById("selecteur").style.display = "none";
+  document.getElementById("contenu").style.display = "flex";
+  document.getElementById("qui").innerHTML =
+    `<span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:${OPS[op]};border:2px solid #fff"></span> ${op}`;
+  maj("Chargement des coordonnées…");
+  const gj = await (await fetch("data.geojson")).json();
+  for (const f of gj.features) {
+    const p = f.properties;
+    coords[p.numero_dpe] = {lat:f.geometry.coordinates[1], lng:f.geometry.coordinates[0],
+      type:p.type, fraicheur:p.fraicheur, etiquette:p.etiquette_dpe, quartier:p.quartier};
+  }
+  maj("Chargement de ta to-do Notion…");
+  let pages = [], cursor = null;
+  do {
+    const r = await (await fetch(PROXY, {method:"POST", headers:{"content-type":"application/json"},
+      body: JSON.stringify({op:"todo", negociateur:op, cursor})})).json();
+    if (r.object === "error") { maj("Erreur Notion : " + r.message); return; }
+    pages = pages.concat(r.results || []);
+    cursor = r.has_more ? r.next_cursor : null;
+  } while (cursor);
+  etapes = pages.map(p => {
+    const rt = p.properties["N° DPE"]?.rich_text?.[0]?.plain_text;
+    const adr = p.properties["Adresse"]?.title?.[0]?.plain_text || "?";
+    const c = coords[rt] || {};
+    return {page_id:p.id, numero:rt, adresse:adr, ...c};
+  }).filter(e => e.lat);
+  if (!etapes.length) { maj("Aucune fiche « À boîter » pour " + op + " — coche d'abord tes adresses dans Notion."); return; }
+  optimiser();
+  dessiner();
+  maj(etapes.length + " adresses — ordre optimisé (plus proche voisin + 2-opt)");
+}
+
+function dist(a, b) { // haversine (metres)
+  const R=6371e3, r=Math.PI/180, dLat=(b.lat-a.lat)*r, dLng=(b.lng-a.lng)*r;
+  const s = Math.sin(dLat/2)**2 + Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dLng/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+
+function optimiser() {
+  // plus proche voisin depuis le point le plus au nord-ouest
+  let reste = [...etapes];
+  reste.sort((a,b)=>(a.lat*-1+a.lng)-(b.lat*-1+b.lng));
+  const ordre = [reste.shift()];
+  while (reste.length) {
+    const der = ordre[ordre.length-1];
+    let mi = 0, md = Infinity;
+    reste.forEach((e,i)=>{ const d = dist(der,e); if (d<md){md=d;mi=i;} });
+    ordre.push(reste.splice(mi,1)[0]);
+  }
+  // 2-opt (profil velo : distance a vol d'oiseau, suffisant en intra-quartier)
+  let gain = true;
+  while (gain) {
+    gain = false;
+    for (let i=0;i<ordre.length-2;i++)
+      for (let j=i+2;j<ordre.length-1;j++) {
+        const avant = dist(ordre[i],ordre[i+1]) + dist(ordre[j],ordre[j+1]);
+        const apres = dist(ordre[i],ordre[j]) + dist(ordre[i+1],ordre[j+1]);
+        if (apres < avant - 1) {
+          ordre.splice(i+1, j-i, ...ordre.slice(i+1, j+1).reverse());
+          gain = true;
+        }
+      }
+  }
+  etapes = ordre;
+}
+
+let carte;
+function dessiner() {
+  if (!carte) {
+    carte = L.map("map");
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom:19}).addTo(carte);
+  }
+  const pts = etapes.map(e=>[e.lat,e.lng]);
+  carte.fitBounds(pts, {padding:[25,25]});
+  etapes.forEach((e,i)=>{
+    L.marker([e.lat,e.lng], {icon: L.divIcon({className:"", html:
+      `<div style="background:#0097A9;color:#fff;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)">${i+1}</div>`,
+      iconSize:[26,26]})}).addTo(carte).bindPopup(`<b>${i+1}. ${e.adresse}</b>`);
+  });
+  L.polyline(pts, {color:"#0097A9", weight:3, opacity:.6, dashArray:"6 8"}).addTo(carte);
+  const ul = document.getElementById("liste");
+  ul.innerHTML = "";
+  etapes.forEach((e,i)=>{
+    const div = document.createElement("div");
+    div.className = "etape"; div.id = "et-"+i;
+    div.innerHTML = `<span class="num" style="background:#0097A9">${i+1}</span>
+      <div class="infos"><b>${e.adresse}</b><br>
+      <small>${FR[e.fraicheur]||""} ${e.fraicheur||""} · DPE ${e.etiquette||"?"} · ${e.type||""} · ${e.quartier||""}</small></div>
+      <input type="checkbox" title="Boîté !">`;
+    div.querySelector("input").onchange = ev => cocher(e, i, ev.target);
+    ul.appendChild(div);
+  });
+  document.getElementById("btn-maps").onclick = () => {
+    // itineraire multi-etapes par segments de 10 (limite Google Maps)
+    for (let i=0; i<etapes.length; i+=9) {
+      const seg = etapes.slice(i, i+10);
+      const way = seg.map(e=>`${e.lat},${e.lng}`).join("/");
+      window.open("https://www.google.com/maps/dir/" + way + "/data=!4m2!4m1" + (GM_MODE[mode]||"!3e1"), "_blank");
+      if (i+10 < etapes.length) break; // segment suivant : re-cliquer apres le 1er
+    }
+  };
+}
+
+async function cocher(e, i, box) {
+  box.disabled = true;
+  const r = await fetch(PROXY, {method:"POST", headers:{"content-type":"application/json"},
+    body: JSON.stringify({op:"coche", page_id:e.page_id, horodatage:new Date().toISOString()})});
+  if (r.ok) {
+    document.getElementById("et-"+i).classList.add("fait");
+    maj(`✅ ${e.adresse} — boîté à ${new Date().toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit"})}`);
+  } else {
+    box.checked = false; box.disabled = false;
+    maj("⚠️ échec d'enregistrement, réessaie (réseau ?)");
+  }
+}
+function maj(t) { document.getElementById("statut-bar").textContent = t; }
+</script>
+</body>
+</html>
