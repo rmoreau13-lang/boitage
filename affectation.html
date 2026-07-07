@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Affectation — Le Pacte Immo</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@600&family=Lato:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --turquoise:#0097A9; }
+  * { box-sizing:border-box; margin:0; }
+  body { font-family:'Lato',sans-serif; height:100vh; display:flex; flex-direction:column; }
+  header { background:var(--turquoise); color:#fff; padding:8px 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-family:'Caveat',cursive; font-size:1.5em; }
+  .compteurs { margin-left:auto; display:flex; gap:6px; font-size:.78em; }
+  .cpt { display:flex; align-items:center; gap:4px; background:rgba(255,255,255,.15); border-radius:10px; padding:3px 8px; }
+  .rond { width:12px; height:12px; border-radius:50%; border:1.5px solid #fff; display:inline-block; }
+  #barre { background:#f4f7f7; padding:8px 12px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .pastille { border:3px solid transparent; border-radius:24px; padding:8px 16px; font-weight:700; color:#fff; cursor:pointer; font-size:1em; }
+  .pastille.active { border-color:#222; transform:scale(1.08); }
+  select, .onglet { padding:6px 10px; border:1px solid #ccc; border-radius:8px; font-family:inherit; background:#fff; cursor:pointer; }
+  .onglet.actif { background:var(--turquoise); color:#fff; border-color:var(--turquoise); }
+  #zone { flex:1; position:relative; min-height:0; }
+  #map { position:absolute; inset:0; }
+  #statut-bar { padding:5px 12px; font-size:.82em; color:#555; background:#f4f7f7; display:flex; gap:12px; }
+  #btn-annuler { border:none; background:#eee; border-radius:6px; padding:2px 10px; cursor:pointer; }
+  /* mode distribution */
+  #deck { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:#eef4f5; flex-direction:column; gap:14px; padding:12px; }
+  #carte-fiche { background:#fff; border-radius:16px; box-shadow:0 6px 24px rgba(0,0,0,.15); padding:22px; max-width:440px; width:100%; text-align:center; }
+  #carte-fiche h2 { font-size:1.25em; margin-bottom:6px; }
+  #carte-fiche .infos { color:#555; line-height:1.7; }
+  #carte-fiche .frais { font-size:1.6em; }
+  #boutons-ops { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; }
+  #boutons-ops .pastille { font-size:1.1em; padding:12px 18px; }
+  #passer { background:none; border:none; color:#888; cursor:pointer; text-decoration:underline; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎯 Affectation des fiches</h1>
+  <div class="compteurs" id="compteurs"></div>
+</header>
+<div id="barre">
+  <span style="font-size:.85em">Distribuer à :</span>
+  <span id="pastilles"></span>
+  <span style="width:14px"></span>
+  <button class="onglet actif" id="ong-carte">🗺️ Carte</button>
+  <button class="onglet" id="ong-deck">🃏 Distribution</button>
+  <select id="f-frais">
+    <option value="">Toutes fraîcheurs</option>
+    <option value="🔥 Brûlant">🔥 Brûlant</option>
+    <option value="🌡️ Chaud">🌡️ Chaud</option>
+    <option value="⏳ Tiède">⏳ Tiède</option>
+    <option value="❄️ Froid">❄️ Froid</option>
+  </select>
+</div>
+<div id="zone">
+  <div id="map"></div>
+  <div id="deck">
+    <div id="carte-fiche"></div>
+    <div id="boutons-ops"></div>
+    <button id="passer">passer cette fiche →</button>
+  </div>
+</div>
+<div id="statut-bar"><span id="msg">Chargement…</span><button id="btn-annuler" style="display:none">↩️ annuler la dernière</button></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const PROXY = "https://robot13-proxy.rmoreau13.workers.dev";
+const OPS = {EGA:"#FF69B4", CRA:"#8A2BE2", JBR:"#FFD700", FJO:"#FF5F1F", RMO:"#003366", ASA:"#39FF14"};
+const FR_COULEUR = {"🔥 Brûlant":"#e53935","🌡️ Chaud":"#fb8c00","⏳ Tiède":"#fdd835","❄️ Froid":"#90a4ae"};
+let coords = {}, fiches = [], marqueurs = {}, actif = null, historique = [], session = {};
+let idx = 0;
+
+const $ = id => document.getElementById(id);
+function maj(t){ $("msg").textContent = t; }
+
+// pastilles de selection
+for (const [op, hex] of Object.entries(OPS)) {
+  const b = document.createElement("button");
+  b.className = "pastille"; b.style.background = hex; b.textContent = op;
+  if (op === "JBR" || op === "ASA") b.style.color = "#333";
+  b.onclick = () => { actif = op;
+    document.querySelectorAll("#pastilles .pastille").forEach(x=>x.classList.remove("active"));
+    b.classList.add("active");
+    maj("Pastille active : " + op + " — clique les marqueurs (ou mode Distribution).");
+  };
+  $("pastilles").appendChild(b);
+  session[op] = 0;
+}
+function majCompteurs(){
+  $("compteurs").innerHTML = Object.entries(OPS).map(([op,hex]) =>
+    `<span class="cpt"><span class="rond" style="background:${hex}"></span>${session[op]}</span>`).join("");
+}
+majCompteurs();
+
+const carte = L.map("map").setView([43.34, 5.42], 12);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {maxZoom:19}).addTo(carte);
+
+async function charger() {
+  maj("Chargement des coordonnées…");
+  const gj = await (await fetch("data.geojson")).json();
+  for (const f of gj.features) coords[f.properties.numero_dpe] = f;
+  maj("Chargement des fiches sans négociateur…");
+  fiches = []; let cursor = null;
+  const frais = $("f-frais").value || null;
+  do {
+    const r = await (await fetch(PROXY, {method:"POST", headers:{"content-type":"application/json"},
+      body: JSON.stringify({op:"sans", cursor, fraicheur: frais})})).json();
+    if (r.object === "error") { maj("Erreur Notion : " + r.message); return; }
+    for (const p of r.results || []) {
+      const num = p.properties["N° DPE"]?.rich_text?.[0]?.plain_text;
+      const g = coords[num];
+      if (!g) continue;
+      const pr = g.properties;
+      fiches.push({page_id:p.id, num, adresse:pr.adresse, quartier:pr.quartier,
+        type:pr.type, etiquette:pr.etiquette_dpe, score:pr.score, fraicheur:pr.fraicheur,
+        lat:g.geometry.coordinates[1], lng:g.geometry.coordinates[0]});
+    }
+    cursor = r.has_more ? r.next_cursor : null;
+    maj("Chargées : " + fiches.length + "…");
+  } while (cursor && fiches.length < 2000);   // garde-fou d'affichage
+  dessiner();
+  idx = 0; majDeck();
+  maj(fiches.length + " fiches à distribuer" + (fiches.length >= 2000 ? " (2 000 affichées — affine avec le filtre fraîcheur)" : "") + ". Choisis une pastille puis clique les marqueurs.");
+}
+
+const FR_EMO = {"🔥 Brûlant":"🔥","🌡️ Chaud":"🌡️","⏳ Tiède":"⏳","❄️ Froid":"❄️"};
+function dessiner() {
+  Object.values(marqueurs).forEach(m => carte.removeLayer(m));
+  marqueurs = {};
+  for (const f of fiches) {
+    const m = L.circleMarker([f.lat, f.lng], {radius:7, color:"#fff", weight:1.5,
+      fillOpacity:.95, fillColor: FR_COULEUR[f.fraicheur] || "#90a4ae"});
+    m.bindTooltip(`${FR_EMO[f.fraicheur]||""} ${f.adresse} · DPE ${f.etiquette||"?"} · ${f.score} pts`);
+    m.on("click", () => affecter(f, m));
+    m.addTo(carte);
+    marqueurs[f.page_id] = m;
+  }
+  if (fiches.length) carte.fitBounds(fiches.map(f=>[f.lat,f.lng]), {padding:[30,30]});
+}
+
+async function affecter(f, m) {
+  if (!actif) { maj("⚠️ Choisis d'abord une pastille en haut !"); return; }
+  const r = await fetch(PROXY, {method:"POST", headers:{"content-type":"application/json"},
+    body: JSON.stringify({op:"affecter", page_id:f.page_id, negociateur:actif})});
+  if (!r.ok) { maj("Échec, réessaie."); return; }
+  if (m) { m.setStyle({fillColor: OPS[actif], radius:8}); m.off("click"); }
+  session[actif]++; majCompteurs();
+  historique.push({f, op:actif});
+  $("btn-annuler").style.display = "";
+  fiches = fiches.filter(x => x.page_id !== f.page_id);
+  maj(`✅ ${f.adresse} → ${actif}`);
+  majDeck();
+}
+
+$("btn-annuler").onclick = async () => {
+  const d = historique.pop();
+  if (!d) return;
+  await fetch(PROXY, {method:"POST", headers:{"content-type":"application/json"},
+    body: JSON.stringify({op:"affecter", page_id:d.f.page_id, negociateur:""})});
+  session[d.op]--; majCompteurs();
+  fiches.unshift(d.f); dessiner(); majDeck();
+  maj(`↩️ ${d.f.adresse} remise dans le paquet`);
+  if (!historique.length) $("btn-annuler").style.display = "none";
+};
+
+// ------- mode distribution (deck) -------
+$("ong-carte").onclick = () => { $("deck").style.display="none"; $("map").style.display="";
+  $("ong-carte").classList.add("actif"); $("ong-deck").classList.remove("actif"); carte.invalidateSize(); };
+$("ong-deck").onclick = () => { $("deck").style.display="flex"; $("map").style.display="none";
+  $("ong-deck").classList.add("actif"); $("ong-carte").classList.remove("actif"); majDeck(); };
+
+function majDeck() {
+  const f = fiches[idx % Math.max(fiches.length,1)];
+  if (!f) { $("carte-fiche").innerHTML = "<h2>🎉 Tout est distribué !</h2>"; $("boutons-ops").innerHTML=""; return; }
+  $("carte-fiche").innerHTML = `
+    <div class="frais">${FR_EMO[f.fraicheur]||""} ${f.fraicheur||""}</div>
+    <h2>${f.adresse}</h2>
+    <div class="infos">${f.quartier||"?"} · ${f.type||""} · DPE <b>${f.etiquette||"?"}</b> · Score <b>${f.score}</b><br>
+    <a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${f.lat},${f.lng}">🗺️ voir sur Maps</a></div>`;
+  $("boutons-ops").innerHTML = "";
+  for (const [op, hex] of Object.entries(OPS)) {
+    const b = document.createElement("button");
+    b.className = "pastille"; b.style.background = hex; b.textContent = op;
+    if (op === "JBR" || op === "ASA") b.style.color = "#333";
+    b.onclick = () => { const cible = f; affecter(cible, marqueurs[cible.page_id]); };
+    $("boutons-ops").appendChild(b);
+  }
+}
+$("passer").onclick = () => { idx++; majDeck(); };
+$("f-frais").onchange = charger;
+
+charger();
+</script>
+</body>
+</html>
